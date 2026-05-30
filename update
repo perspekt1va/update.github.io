@@ -3,7 +3,17 @@ COMMAND="$1"
 CONFIG="/etc/config/podkop"
 TMP_FILE="/tmp/podkop_tmp"
 VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02886f4fd1d9/raw/subscription"
+
+# ── Ограничение по модели ───────────────────────────────────────────────
+# Модели, попадающие под шаблон, получают не более $MAX_LIMITED серверов.
+# Шаблон — регулярка для grep -iE (регистр не важен). Проверь реальные
+# строки моделей командой:  cat /tmp/sysinfo/model
+MAX_LIMITED=100
+LIMITED_PATTERN='mi router 4|turbo'
+# ────────────────────────────────────────────────────────────────────────
+
 log() { echo "[$(date '+%F %T')] $*"; }
+
 restart_target() {
   if [ -x /etc/init.d/podkop ]; then
     /etc/init.d/podkop restart && log "podkop: restart OK" && return 0
@@ -19,17 +29,51 @@ restart_target() {
   fi
   log "Не нашёл /etc/init.d/podkop и /etc/init.d/sing-box — рестарт пропущен."
 }
+
+# ── Определение модели роутера ──────────────────────────────────────────
+get_model() {
+  if [ -r /tmp/sysinfo/model ]; then
+    cat /tmp/sysinfo/model
+  elif command -v ubus >/dev/null 2>&1; then
+    ubus call system board 2>/dev/null \
+      | grep -o '"model"[^,]*' | head -n1 \
+      | sed 's/.*: *"//; s/".*//'
+  elif [ -r /proc/device-tree/model ]; then
+    tr -d '\0' < /proc/device-tree/model
+  fi
+}
+
+MODEL=$(get_model)
+log "Модель роутера: ${MODEL:-неизвестно}"
+
+LIMIT=0
+if [ -n "$MODEL" ] && echo "$MODEL" | grep -iqE "$LIMITED_PATTERN"; then
+  LIMIT="$MAX_LIMITED"
+  log "Модель в списке ограниченных — максимум $LIMIT серверов."
+fi
+# ────────────────────────────────────────────────────────────────────────
+
 VLESS_LIST=$(wget --no-check-certificate --user-agent="KyKyIIIKuHVless" -qO- "$VLESS_URL" | base64 -d | grep 'vless://' | grep -v 'xhttp')
 if [ -z "$VLESS_LIST" ]; then
     echo "? Не удалось получить VLESS список"
     exit 1
 fi
+
+TOTAL=$(echo "$VLESS_LIST" | grep -c 'vless://')
+if [ "$LIMIT" -gt 0 ] && [ "$TOTAL" -gt "$LIMIT" ]; then
+    VLESS_LIST=$(echo "$VLESS_LIST" | head -n "$LIMIT")
+    log "Серверов доступно: $TOTAL, записано: $LIMIT (ограничение по модели)."
+else
+    log "Серверов доступно: $TOTAL, записано: все."
+fi
+
 awk '
 BEGIN { in_main=0 }
 /^config section '\''main'\''/ { in_main=1; print; next }
 /^config section / && !/^config section '\''main'\''/ { in_main=0 }
 { if (in_main && $1=="list" && $2=="urltest_proxy_links") next; print }
 ' "$CONFIG" > "$TMP_FILE"
+
 awk -v vless_list="$VLESS_LIST" '
 BEGIN { split(vless_list, arr, "\n"); in_main=0 }
 /^config section '\''main'\''/ { in_main=1 }
@@ -37,6 +81,8 @@ in_main && /^config section / && !/^config section '\''main'\''/ { in_main=0 }
 { print; if (in_main && /^config section / && !/^config section '\''main'\''/) { for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i]; in_main=0 } }
 END { if (in_main) for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i] }
 ' "$TMP_FILE" > "$CONFIG"
+
 rm -f "$TMP_FILE"
+
 if [ "$COMMAND" = "restart" ]; then restart_target; fi
 echo "Сервера обновлены"
