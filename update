@@ -9,7 +9,7 @@ VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02
 # Шаблон — регулярка для grep -iE (регистр не важен). Проверь реальные
 # строки моделей командой:  cat /tmp/sysinfo/model
 MAX_LIMITED=100
-LIMITED_PATTERN='mi router 4|turbo'
+LIMITED_PATTERN='mi router 4|turbo|dir-2150'
 # ────────────────────────────────────────────────────────────────────────
 
 log() { echo "[$(date '+%F %T')] $*"; }
