@@ -1,16 +1,18 @@
 #!/bin/sh
+# podkop server-updater.
+# Метод записи определяется ПО ФОРМАТУ конфига (а не по модели):
+#   • config main 'main'    -> наш бэкпорт (Xiaomi Gigabit v1/v2) -> запись через UCI
+#   • config section 'main' -> новый podkop (все прочие)          -> оригинальный awk
+# Лимит серверов вешается ПО МОДЕЛИ (слабые: Gigabit v1/v2, DIR-2150,
+# Xiaomi 4, Xiaomi/Redmi AC2100) — независимо от формата конфига.
+#
+# Использование:  sh update.sh [restart]
 COMMAND="$1"
 CONFIG="/etc/config/podkop"
-TMP_FILE="/tmp/podkop_tmp"
 VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02886f4fd1d9/raw/subscription"
 
-# ── Ограничение по модели ───────────────────────────────────────────────
-# Модели, попадающие под шаблон, получают не более $MAX_LIMITED серверов.
-# Шаблон — регулярка для grep -iE (регистр не важен). Проверь реальные
-# строки моделей командой:  cat /tmp/sysinfo/model
 MAX_LIMITED=100
-LIMITED_PATTERN='mi router 4|turbo|dir-2150'
-# ────────────────────────────────────────────────────────────────────────
+WEAK_PATTERN='mi router 4|ac2100|dir-2150|xiaomi.*gigabit|redmi.*(ac2100|gigabit)'
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -19,70 +21,97 @@ restart_target() {
     /etc/init.d/podkop restart && log "podkop: restart OK" && return 0
   fi
   if [ -x /etc/init.d/sing-box ]; then
-    if /etc/init.d/sing-box reload 2>/dev/null; then
-      log "sing-box: reload OK"
-    else
-      /etc/init.d/sing-box restart
-      log "sing-box: restart OK"
-    fi
-    return 0
+    /etc/init.d/sing-box reload 2>/dev/null && { log "sing-box: reload OK"; return 0; }
+    /etc/init.d/sing-box restart && log "sing-box: restart OK"; return 0
   fi
-  log "Не нашёл /etc/init.d/podkop и /etc/init.d/sing-box — рестарт пропущен."
+  log "Не нашёл init-скрипты podkop/sing-box — рестарт пропущен."
 }
 
-# ── Определение модели роутера ──────────────────────────────────────────
 get_model() {
-  if [ -r /tmp/sysinfo/model ]; then
-    cat /tmp/sysinfo/model
+  if [ -r /tmp/sysinfo/model ]; then cat /tmp/sysinfo/model
   elif command -v ubus >/dev/null 2>&1; then
-    ubus call system board 2>/dev/null \
-      | grep -o '"model"[^,]*' | head -n1 \
-      | sed 's/.*: *"//; s/".*//'
-  elif [ -r /proc/device-tree/model ]; then
-    tr -d '\0' < /proc/device-tree/model
+    ubus call system board 2>/dev/null | grep -o '"model"[^,]*' | head -n1 | sed 's/.*: *"//; s/".*//'
+  elif [ -r /proc/device-tree/model ]; then tr -d '\0' < /proc/device-tree/model
   fi
+}
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 8 --max-time 30 -A "KyKyIIIKuHVless" "$1" 2>/dev/null && return 0
+  fi
+  if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -qO- --timeout=20 "$1" 2>/dev/null && return 0
+  fi
+  wget --no-check-certificate --user-agent="KyKyIIIKuHVless" -qO- "$1" 2>/dev/null
 }
 
 MODEL=$(get_model)
 log "Модель роутера: ${MODEL:-неизвестно}"
 
-LIMIT=0
-if [ -n "$MODEL" ] && echo "$MODEL" | grep -iqE "$LIMITED_PATTERN"; then
-  LIMIT="$MAX_LIMITED"
-  log "Модель в списке ограниченных — максимум $LIMIT серверов."
-fi
-# ────────────────────────────────────────────────────────────────────────
-
-VLESS_LIST=$(wget --no-check-certificate --user-agent="KyKyIIIKuHVless" -qO- "$VLESS_URL" | base64 -d | grep 'vless://' | grep -v 'xhttp')
-if [ -z "$VLESS_LIST" ]; then
-    echo "? Не удалось получить VLESS список"
-    exit 1
-fi
-
-TOTAL=$(echo "$VLESS_LIST" | grep -c 'vless://')
-if [ "$LIMIT" -gt 0 ] && [ "$TOTAL" -gt "$LIMIT" ]; then
-    VLESS_LIST=$(echo "$VLESS_LIST" | head -n "$LIMIT")
-    log "Серверов доступно: $TOTAL, записано: $LIMIT (ограничение по модели)."
+# ── формат конфига (метод записи) ───────────────────────────────────────
+if grep -q "^config main 'main'" "$CONFIG" 2>/dev/null; then
+  FORMAT="old"   # наш бэкпорт: config main 'main'
 else
-    log "Серверов доступно: $TOTAL, записано: все."
+  FORMAT="new"   # новый podkop: config section 'main'
+fi
+log "Формат конфига: $FORMAT"
+
+# ── лимит по модели ─────────────────────────────────────────────────────
+LIMIT=0
+if [ -n "$MODEL" ] && echo "$MODEL" | grep -iqE "$WEAK_PATTERN"; then
+  LIMIT="$MAX_LIMITED"
+  log "Слабая модель — лимит $LIMIT серверов."
 fi
 
-awk '
-BEGIN { in_main=0 }
-/^config section '\''main'\''/ { in_main=1; print; next }
-/^config section / && !/^config section '\''main'\''/ { in_main=0 }
-{ if (in_main && $1=="list" && $2=="urltest_proxy_links") next; print }
-' "$CONFIG" > "$TMP_FILE"
+# ── получить список VLESS ───────────────────────────────────────────────
+RAW=$(fetch "$VLESS_URL")
+VLESS_LIST=$(printf '%s' "$RAW" | base64 -d 2>/dev/null | grep 'vless://' | grep -v 'xhttp')
+if [ -z "$VLESS_LIST" ]; then
+  echo "✗ Не удалось получить VLESS список (проверьте доступ к подписке)"
+  exit 1
+fi
+TOTAL=$(printf '%s\n' "$VLESS_LIST" | grep -c 'vless://')
+if [ "$LIMIT" -gt 0 ] && [ "$TOTAL" -gt "$LIMIT" ]; then
+  VLESS_LIST=$(printf '%s\n' "$VLESS_LIST" | head -n "$LIMIT")
+  WRITTEN="$LIMIT"
+  log "Доступно $TOTAL, записано $LIMIT (лимит модели)."
+else
+  WRITTEN="$TOTAL"
+  log "Доступно $TOTAL, записано все."
+fi
 
-awk -v vless_list="$VLESS_LIST" '
-BEGIN { split(vless_list, arr, "\n"); in_main=0 }
-/^config section '\''main'\''/ { in_main=1 }
-in_main && /^config section / && !/^config section '\''main'\''/ { in_main=0 }
-{ print; if (in_main && /^config section / && !/^config section '\''main'\''/) { for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i]; in_main=0 } }
-END { if (in_main) for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i] }
-' "$TMP_FILE" > "$CONFIG"
+# ── запись по формату ───────────────────────────────────────────────────
+if [ "$FORMAT" = "old" ]; then
+  # Xiaomi Gigabit v1/v2 (наш бэкпорт) — через UCI
+  uci -q delete podkop.main.urltest_proxy_links
+  TMP="/tmp/podkop_vless_$$"
+  printf '%s\n' "$VLESS_LIST" > "$TMP"
+  while IFS= read -r link; do
+    [ -n "$link" ] && uci add_list podkop.main.urltest_proxy_links="$link"
+  done < "$TMP"
+  rm -f "$TMP"
+  uci -q set podkop.main.proxy_config_type='urltest'
+  uci commit podkop
+else
+  # Новый podkop — оригинальная awk-логика (config section 'main')
+  TMP_FILE="/tmp/podkop_tmp"
+  awk '
+  BEGIN { in_main=0 }
+  /^config section '\''main'\''/ { in_main=1; print; next }
+  /^config section / && !/^config section '\''main'\''/ { in_main=0 }
+  { if (in_main && $1=="list" && $2=="urltest_proxy_links") next; print }
+  ' "$CONFIG" > "$TMP_FILE"
 
-rm -f "$TMP_FILE"
+  awk -v vless_list="$VLESS_LIST" '
+  BEGIN { split(vless_list, arr, "\n"); in_main=0 }
+  /^config section '\''main'\''/ { in_main=1 }
+  in_main && /^config section / && !/^config section '\''main'\''/ { in_main=0 }
+  { print; if (in_main && /^config section / && !/^config section '\''main'\''/) { for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i]; in_main=0 } }
+  END { if (in_main) for (i in arr) if (arr[i] != "") printf "\tlist urltest_proxy_links '\''%s'\''\n", arr[i] }
+  ' "$TMP_FILE" > "$CONFIG"
+  rm -f "$TMP_FILE"
+fi
 
 if [ "$COMMAND" = "restart" ]; then restart_target; fi
+echo "Серверов: $WRITTEN"
 echo "Сервера обновлены"
