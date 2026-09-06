@@ -12,10 +12,10 @@ CONFIG="/etc/config/podkop"
 VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02886f4fd1d9/raw/subscription"
 
 # Ступенчатый лимит серверов по модели:
-#   Xiaomi 4A Gigabit v1/v2 (MT7621, 128МБ) -> 25 (иначе fakeip захлёбывается)
+#   Xiaomi 4A Gigabit v1/v2 (MT7621, 128МБ) -> 50 (иначе fakeip захлёбывается)
 #   прочие слабые (DIR-2150, Xiaomi 4, Xiaomi/Redmi AC2100)  -> 100
 GIGABIT_PATTERN='mi router 4a gigabit|mi router 4 gigabit|xiaomi.*4a.*gigabit'
-GIGABIT_LIMIT=25
+GIGABIT_LIMIT=50
 WEAK_PATTERN='mi router 4|ac2100|dir-2150|xiaomi.*gigabit|redmi.*(ac2100|gigabit)'
 WEAK_LIMIT=100
 
