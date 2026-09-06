@@ -11,8 +11,13 @@ COMMAND="$1"
 CONFIG="/etc/config/podkop"
 VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02886f4fd1d9/raw/subscription"
 
-MAX_LIMITED=100
+# Ступенчатый лимит серверов по модели:
+#   Xiaomi 4A Gigabit v1/v2 (MT7621, 128МБ) -> 25 (иначе fakeip захлёбывается)
+#   прочие слабые (DIR-2150, Xiaomi 4, Xiaomi/Redmi AC2100)  -> 100
+GIGABIT_PATTERN='mi router 4a gigabit|mi router 4 gigabit|xiaomi.*4a.*gigabit'
+GIGABIT_LIMIT=25
 WEAK_PATTERN='mi router 4|ac2100|dir-2150|xiaomi.*gigabit|redmi.*(ac2100|gigabit)'
+WEAK_LIMIT=100
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -58,9 +63,14 @@ log "Формат конфига: $FORMAT"
 
 # ── лимит по модели ─────────────────────────────────────────────────────
 LIMIT=0
-if [ -n "$MODEL" ] && echo "$MODEL" | grep -iqE "$WEAK_PATTERN"; then
-  LIMIT="$MAX_LIMITED"
-  log "Слабая модель — лимит $LIMIT серверов."
+if [ -n "$MODEL" ]; then
+  if echo "$MODEL" | grep -iqE "$GIGABIT_PATTERN"; then
+    LIMIT="$GIGABIT_LIMIT"
+    log "Xiaomi 4A Gigabit — лимит $LIMIT серверов (слабое железо, fakeip)."
+  elif echo "$MODEL" | grep -iqE "$WEAK_PATTERN"; then
+    LIMIT="$WEAK_LIMIT"
+    log "Слабая модель — лимит $LIMIT серверов."
+  fi
 fi
 
 # ── получить список VLESS ───────────────────────────────────────────────
