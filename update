@@ -3,19 +3,22 @@
 # Метод записи определяется ПО ФОРМАТУ конфига (а не по модели):
 #   • config main 'main'    -> наш бэкпорт (Xiaomi Gigabit v1/v2) -> запись через UCI
 #   • config section 'main' -> новый podkop (все прочие)          -> оригинальный awk
-# Лимит серверов вешается ПО МОДЕЛИ (слабые: Gigabit v1/v2, DIR-2150,
-# Xiaomi 4, Xiaomi/Redmi AC2100) — независимо от формата конфига.
+#
+# Лимит серверов вешается ПО ЖЕЛЕЗУ:
+#   • ЛЮБОЙ MT7621 (DIR-2150, Xiaomi 4A/4 Gigabit v1/v2, Mi Router 4,
+#     Xiaomi/Redmi AC2100 и т.д.) -> 50 серверов.
+#     На MT7621 (128/256 МБ) конфиг sing-box на 100+ аутбаундов с fakeip
+#     собирается минутами и захлёбывается, поэтому жёсткий потолок 50.
+#   • прочее заведомо слабое, не MT7621 -> 100 (fallback по имени модели).
+#   • всё остальное -> без лимита.
 #
 # Использование:  sh update.sh [restart]
 COMMAND="$1"
 CONFIG="/etc/config/podkop"
 VLESS_URL="https://gist.githubusercontent.com/perspekt1va/1b7807389ed25f0fbbde02886f4fd1d9/raw/subscription"
 
-# Ступенчатый лимит серверов по модели:
-#   Xiaomi 4A Gigabit v1/v2 (MT7621, 128МБ) -> 50 (иначе fakeip захлёбывается)
-#   прочие слабые (DIR-2150, Xiaomi 4, Xiaomi/Redmi AC2100)  -> 100
-GIGABIT_PATTERN='mi router 4a gigabit|mi router 4 gigabit|xiaomi.*4a.*gigabit'
-GIGABIT_LIMIT=50
+# Потолок для MT7621 и fallback для прочего слабого железа
+MT7621_LIMIT=50
 WEAK_PATTERN='mi router 4|ac2100|dir-2150|xiaomi.*gigabit|redmi.*(ac2100|gigabit)'
 WEAK_LIMIT=100
 
@@ -40,6 +43,27 @@ get_model() {
   fi
 }
 
+# Надёжное определение SoC MT7621: сперва по железу (cpuinfo / device-tree),
+# затем — как запасной вариант — по имени модели.
+is_mt7621() {
+  if grep -qiE 'mt7621|mediatek[^0-9]*7621' /proc/cpuinfo 2>/dev/null; then
+    return 0
+  fi
+  if [ -r /proc/device-tree/compatible ]; then
+    if tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | grep -qi '7621'; then
+      return 0
+    fi
+  fi
+  if command -v ubus >/dev/null 2>&1; then
+    if ubus call system board 2>/dev/null | grep -qi '7621'; then
+      return 0
+    fi
+  fi
+  # fallback по имени модели (известные MT7621-устройства)
+  echo "$MODEL" | grep -iqE 'mt7621|gigabit|dir-2150|ac2100|mi router 4[^cq]|redmi.*(ac2100|ax6|gigabit)' && return 0
+  return 1
+}
+
 fetch() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --connect-timeout 8 --max-time 30 -A "KyKyIIIKuHVless" "$1" 2>/dev/null && return 0
@@ -61,16 +85,14 @@ else
 fi
 log "Формат конфига: $FORMAT"
 
-# ── лимит по модели ─────────────────────────────────────────────────────
+# ── лимит по железу ─────────────────────────────────────────────────────
 LIMIT=0
-if [ -n "$MODEL" ]; then
-  if echo "$MODEL" | grep -iqE "$GIGABIT_PATTERN"; then
-    LIMIT="$GIGABIT_LIMIT"
-    log "Xiaomi 4A Gigabit — лимит $LIMIT серверов (слабое железо, fakeip)."
-  elif echo "$MODEL" | grep -iqE "$WEAK_PATTERN"; then
-    LIMIT="$WEAK_LIMIT"
-    log "Слабая модель — лимит $LIMIT серверов."
-  fi
+if is_mt7621; then
+  LIMIT="$MT7621_LIMIT"
+  log "SoC MT7621 — лимит $LIMIT серверов (слабое железо, fakeip)."
+elif [ -n "$MODEL" ] && echo "$MODEL" | grep -iqE "$WEAK_PATTERN"; then
+  LIMIT="$WEAK_LIMIT"
+  log "Слабая модель (не MT7621) — лимит $LIMIT серверов."
 fi
 
 # ── получить список VLESS ───────────────────────────────────────────────
@@ -84,7 +106,7 @@ TOTAL=$(printf '%s\n' "$VLESS_LIST" | grep -c 'vless://')
 if [ "$LIMIT" -gt 0 ] && [ "$TOTAL" -gt "$LIMIT" ]; then
   VLESS_LIST=$(printf '%s\n' "$VLESS_LIST" | head -n "$LIMIT")
   WRITTEN="$LIMIT"
-  log "Доступно $TOTAL, записано $LIMIT (лимит модели)."
+  log "Доступно $TOTAL, записано $LIMIT (лимит железа)."
 else
   WRITTEN="$TOTAL"
   log "Доступно $TOTAL, записано все."
