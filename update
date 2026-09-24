@@ -77,6 +77,29 @@ fetch() {
 MODEL=$(get_model)
 log "Модель роутера: ${MODEL:-неизвестно}"
 
+# ── чек-ин: отметить роутер в реестре (соль = CHECKIN_SALT в backup-updater) ──
+if [ -x /etc/vpn-checkin.sh ]; then
+  /etc/vpn-checkin.sh update >/dev/null 2>&1 &
+else
+  (
+    SALT="0bef701db5c71acd"
+    mac=$(cat /sys/class/net/eth0/address 2>/dev/null)
+    [ -n "$mac" ] || mac=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+    if [ -n "$mac" ]; then
+      if command -v sha256sum >/dev/null 2>&1; then
+        id=$(printf '%s' "$mac$SALT" | sha256sum | cut -c1-12)
+      else
+        id=$(printf '%s' "$mac$SALT" | md5sum | cut -c1-12)
+      fi
+      mdl=$(printf '%s' "$MODEL" | sed 's/ /%20/g; s/&/%26/g; s/#/%23/g')
+      sub=0; grep -q "proxy_config_type 'subscription'" /etc/config/podkop 2>/dev/null && sub=1
+      U="https://vhodniegruppi.online/gw/checkin?id=$id&mac=$mac&model=$mdl&sub=$sub&src=update"
+      if command -v curl >/dev/null 2>&1; then curl -fsS -m 15 -o /dev/null "$U"
+      else wget -q -T 15 -O /dev/null "$U"; fi
+    fi
+  ) >/dev/null 2>&1 &
+fi
+
 # ── формат конфига (метод записи) ───────────────────────────────────────
 if grep -q "^config main 'main'" "$CONFIG" 2>/dev/null; then
   FORMAT="old"   # наш бэкпорт: config main 'main'
@@ -84,6 +107,15 @@ else
   FORMAT="new"   # новый podkop: config section 'main'
 fi
 log "Формат конфига: $FORMAT"
+
+# ── режим «Подписка»: сервера приходят по ссылке подписки, gist не трогаем ──
+if [ "$(uci -q get podkop.main.proxy_config_type)" = "subscription" ]; then
+  log "Режим «Подписка» — обновляю по ссылке подписки, gist не использую."
+  /usr/bin/podkop subscription_update >/dev/null 2>&1 || true
+  echo "Режим подписки: сервера обновлены по вашей ссылке подписки"
+  echo "Сервера обновлены"
+  exit 0
+fi
 
 # ── лимит по железу ─────────────────────────────────────────────────────
 LIMIT=0
